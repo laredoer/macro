@@ -35,6 +35,7 @@ func main() {
 				continue
 			}
 			pkgName := fl.Name.Name
+			var structs []*Struct
 			for _, d := range fl.Decls {
 				switch spec := d.(type) {
 				case *ast.FuncDecl:
@@ -46,12 +47,11 @@ func main() {
 
 						for _, t := range spec.Specs {
 							tp := t.(*ast.TypeSpec)
-
 							switch typo := tp.Type.(type) {
 							case *ast.Ident:
 								spew.Printf("typo %#v\n", typo)
 							case *ast.StructType:
-								parserStruct(tp, typo.Fields)
+								structs = append(structs, parserStruct(tp, typo.Fields))
 							default:
 							}
 
@@ -65,6 +65,18 @@ func main() {
 					}
 				}
 			}
+
+			var hasAnnotations bool
+			for _, v := range structs {
+				if len(v.Annotations) != 0 {
+					hasAnnotations = true
+				}
+			}
+
+			if !hasAnnotations {
+				continue
+			}
+			
 			t, _ := template.New("test").Parse(macro.Tpl)
 			f := createMacroFile(goFiles[i])
 			t.Execute(f, map[string]interface{}{"Pkg": pkgName})
