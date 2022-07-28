@@ -6,83 +6,53 @@ import (
 	"github.com/wule61/macro"
 	"go/ast"
 	"go/token"
+	"go/types"
 	"golang.org/x/tools/go/packages"
 	"os"
+	"reflect"
 	"regexp"
 	"strings"
-	"text/template"
 )
+
+// macroInterface holds the reflect.Type of macro.Annotator.
+var macroInterface = reflect.TypeOf(struct{ macro.Annotator }{}).Field(0).Type
 
 func main() {
 	// src is the input for which we create the AST that we
 	// are going to manipulate.
 
 	pkgs, err := packages.Load(&packages.Config{
-		Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedSyntax,
-		Dir:  "./",
-	}, "./...")
+		Mode: packages.NeedName | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedModule,
+	}, "./src", macroInterface.PkgPath())
 	if err != nil {
 		panic(err)
 	}
 
-	for _, pkg := range pkgs {
-
-		goFiles := pkg.GoFiles
-		spew.Dump("go files: ", goFiles)
-		for i, fl := range pkg.Syntax {
-			spew.Dump(fl.Imports)
-			if strings.Contains(goFiles[i], "_macro") || strings.Contains(goFiles[i], "main.go") {
-				continue
-			}
-			pkgName := fl.Name.Name
-			var structs []*Struct
-			for _, d := range fl.Decls {
-				switch spec := d.(type) {
-				case *ast.FuncDecl:
-					spew.Println("FuncDecl", spec.Name.Name)
-				case *ast.GenDecl:
-					if spec.Tok == token.TYPE {
-
-						spew.Println("len:", len(spec.Specs))
-
-						for _, t := range spec.Specs {
-							tp := t.(*ast.TypeSpec)
-							switch typo := tp.Type.(type) {
-							case *ast.Ident:
-								spew.Printf("typo %#v\n", typo)
-							case *ast.StructType:
-								structs = append(structs, parserStruct(tp, typo.Fields))
-							default:
-							}
-
-							if spec.Doc != nil {
-								lines := spec.Doc.List
-								for _, c := range lines {
-									fmt.Println("  token type:", c.Text)
-								}
-							}
-						}
-					}
-				}
-			}
-
-			var hasAnnotations bool
-			for _, v := range structs {
-				if len(v.Annotations) != 0 {
-					hasAnnotations = true
-				}
-			}
-
-			if !hasAnnotations {
-				continue
-			}
-			
-			t, _ := template.New("test").Parse(macro.Tpl)
-			f := createMacroFile(goFiles[i])
-			t.Execute(f, map[string]interface{}{"Pkg": pkgName})
-			f.Close()
-		}
+	macroPkg, pkg := pkgs[0], pkgs[1]
+	if len(pkg.Errors) != 0 {
+		panic(pkg.Errors[0])
 	}
+	if pkgs[0].PkgPath != macroInterface.PkgPath() {
+		macroPkg, pkg = pkgs[1], pkgs[0]
+	}
+	var names []string
+	iface := macroPkg.Types.Scope().Lookup(macroInterface.Name()).Type().Underlying().(*types.Interface)
+	for k, v := range pkg.TypesInfo.Defs {
+		typ, ok := v.(*types.TypeName)
+		if !ok || !k.IsExported() || !types.Implements(typ.Type(), iface) {
+			continue
+		}
+		spec, ok := k.Obj.Decl.(*ast.TypeSpec)
+		if !ok {
+			panic(fmt.Errorf("invalid declaration %T for %s", k.Obj.Decl, k.Name))
+		}
+		if _, ok := spec.Type.(*ast.StructType); !ok {
+			panic(fmt.Errorf("invalid spec type %T for %s", spec.Type, k.Name))
+		}
+		names = append(names, k.Name)
+	}
+
+	fmt.Println(names)
 }
 
 type Visitor struct {
@@ -155,21 +125,9 @@ func createMacroFile(filePath string) *os.File {
 	return f
 }
 
-type Field struct {
-	FieldName string
-	FieldType string
-	FieldTag  string
-}
+func parserStruct(typeSpec *ast.TypeSpec, fields *ast.FieldList) *macro.Struct {
 
-type Struct struct {
-	Name        string
-	Fields      []Field
-	Annotations []string
-}
-
-func parserStruct(typeSpec *ast.TypeSpec, fields *ast.FieldList) *Struct {
-
-	s := &Struct{
+	s := &macro.Struct{
 		Name: typeSpec.Name.Name,
 	}
 
@@ -218,7 +176,7 @@ func parserStruct(typeSpec *ast.TypeSpec, fields *ast.FieldList) *Struct {
 				fieldTag = field.Tag.Value
 			}
 
-			s.Fields = append(s.Fields, Field{
+			s.Fields = append(s.Fields, macro.Field{
 				FieldName: fieldName.Name,
 				FieldType: fieldType,
 				FieldTag:  fieldTag,
